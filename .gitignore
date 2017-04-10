@@ -1,3 +1,9 @@
 .idea/
 out/
 *.iml
+
+read/*
+!read/.gitkeep
+
+write/*
+!write/.gitkeep

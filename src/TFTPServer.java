@@ -1,11 +1,9 @@
-import java.io.BufferedInputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
+import java.io.*;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 public class TFTPServer
@@ -78,9 +76,9 @@ public class TFTPServer
 
                         String[] ip = clientAddress.getAddress().toString().split("/");
 
-                        System.out.printf("%s request for %s , IP: %s, port: %s \n",
-                                (reqtype == OP_RRQ)?"Read":"Write",
-                                clientAddress.getHostName(), ip[1], clientAddress.getPort());
+//                        System.out.printf("%s request for %s , IP: %s, port: %s \n",
+//                                (reqtype == OP_RRQ)?"Read":"Write",
+//                                clientAddress.getHostName(), ip[1], clientAddress.getPort());
 
                         // Read request
                         if (reqtype == OP_RRQ)
@@ -116,10 +114,11 @@ public class TFTPServer
         DatagramPacket rcv_pack = new DatagramPacket(buf, buf.length);
         // Receive packet
         socket.receive(rcv_pack);
+
         // Get client address and port from the packet
         //System.out.println("Client's address: "+rcv_pack.getAddress()+"| Client's port: "+rcv_pack.getPort());
 
-        byte[] parser = rcv_pack.getData();
+        // byte[] parser = rcv_pack.getData();
 		
 		/*if(parser[1] == 0x01) {
 			System.out.println("Client requests read-op");
@@ -142,7 +141,7 @@ public class TFTPServer
     {
 
         // See "TFTP Formats" in TFTP specification for the RRQ/WRQ request contents
-        if(buf[1] == 0x01 || buf[1] == 0x02) {
+//        if(buf[1] == 0x01 || buf[1] == 0x02) {
             int index = 2;
             int modestart = 0;
             while(buf[index] != 0){
@@ -150,17 +149,15 @@ public class TFTPServer
                 index++;
                 modestart = index;
             }
-            while(buf[modestart] != 0) {
+            /*while(buf[modestart] != 0) {
                 requestedFile.append((char) buf[modestart]);
                 modestart++;
-            }
-
-            System.out.println("Client requests read-op "+ requestedFile.toString());
-        }
+            }*/
+        /*}
         else if(buf[0] == 0x02) {
             System.out.println("Client requests write-op");
-        }
-        return 1;
+        }*/
+        return fromBytes(buf[0], buf[1]);
     }
 
     /**
@@ -176,21 +173,35 @@ public class TFTPServer
         if(opcode == OP_RRQ)
         {
             // See "TFTP Formats" in TFTP specification for the DATA and ACK packet contents
+            System.out.println("read request");
             boolean result = send_DATA_receive_ACK(sendSocket, requestedFile, opcode);
         }
         else if (opcode == OP_WRQ)
         {
+            System.out.println("write request");
             boolean result = receive_DATA_send_ACK(sendSocket, requestedFile, opcode);
         }
         else
         {
             System.err.println("Invalid request. Sending an error packet.");
             // See "TFTP Formats" in TFTP specification for the ERROR packet contents
-            send_ERR(sendSocket, requestedFile);
+            send_ERR(sendSocket, "Not defined", 0);
             return;
         }
     }
 
+    private byte[] toBytes(int value){
+        ByteBuffer wrap = ByteBuffer.allocate(2);
+        wrap.putShort((short)value);
+        return wrap.array();
+    }
+    private int fromBytes(byte a, byte b){
+        ByteBuffer wrap = ByteBuffer.allocate(2);
+        wrap.put(a);
+        wrap.put(b);
+        short m = wrap.getShort(0);
+        return m;
+    }
     /**
      To be implemented
      * @throws IOException
@@ -198,6 +209,15 @@ public class TFTPServer
     private boolean send_DATA_receive_ACK(DatagramSocket sendSocket, String requested_file, int opcode) throws IOException {
         // Defining file
         File file = new File(requested_file);
+        if(!file.exists() && !file.isFile()) {
+            // send error
+            send_ERR(sendSocket, "File not found", 1);
+            return false;
+        }
+        if(requested_file.contains("secret/")){
+            send_ERR(sendSocket, "Access violation", 2);
+            return false;
+        }
 
         // Defining the size of the file in bytes
         int file_size = (int) file.length();
@@ -208,6 +228,9 @@ public class TFTPServer
         // Remaining block's bytes
         int block_mod = file_size % 512;
 
+        // Current block number
+        int block = 1;
+
         // If file is less than 512 bytes, we assume that it will take 1 block to transfer
         if(blocks == 0) {
             blocks = 1;
@@ -216,14 +239,12 @@ public class TFTPServer
         // Opening stream for a file
         BufferedInputStream  fis = new BufferedInputStream(new FileInputStream(file));
 
-        if(blocks == 1) {
+//        if(blocks == 1) {
             // Creating byte-array for storing header of the packet
             byte[] data_header = new byte[4];
 
             // Defining DATA-bytes identifiers
             data_header[0] = (byte) 0; data_header[1] = (byte) 3;
-            // Defining block's number
-            data_header[2] = (byte) 0; data_header[3] = (byte) blocks;
 
             // Creating buffer for reading the file
             byte[] buffer = new byte[(int) file.length()];
@@ -234,108 +255,145 @@ public class TFTPServer
             // Closing stream (no use)
             fis.close();
 
-            // Concat two byte-arrays into one packet for delivery!
-            byte[] send_packet = new byte[data_header.length + buffer.length];
+            // Error catcher
+            int errorcount = 0;
 
-            // Copying content of the DATA-header to packet-array
-            System.arraycopy(data_header, 0, send_packet, 0, data_header.length);
+            for(block = 1; block < blocks+1; block++){
+                // Defining block's number
+                if(errorcount > 3) return false; // no more tries!
+                byte[] blockArr = toBytes(block);
+                data_header[2] = blockArr[0]; data_header[3] = blockArr[1];
 
-            // Copying content of the file's bytes to packet-array
-            System.arraycopy(buffer, 0, send_packet, data_header.length, buffer.length);
+                // our packet length
+                int packetLength = (block < blocks ? 512 : block_mod);
 
-            // Creating UDP-datagram and sending to destination point
-            DatagramPacket output = new DatagramPacket(send_packet, send_packet.length);
-            sendSocket.send(output);
 
-            // Receiving ACK-message
-            byte[] ack_packet = new byte[4];
-            DatagramPacket ack = new DatagramPacket(ack_packet, ack_packet.length);
-            sendSocket.receive(ack);
-
-            // Checking content of ACK-message
-            if(ack_packet[0] != 0 || ack_packet[1] != 4) {
-                System.out.println("Message header is not equal to 0x04! Content: "+ack_packet[0]+"|"+ack_packet[1]);
-            }
-            if(ack_packet[2] != 0 || ack_packet[3] != (byte) blocks) {
-                System.out.println("Wrong block's value! Content: "+ack_packet[2]+"|"+ack_packet[3]);
-            }
-
-        }
-        else {
-            // Creating byte-array for storing header of the packet
-            byte[] data_header = new byte[4];
-
-            // Defining DATA-bytes identifiers
-            data_header[0] = (byte) 0; data_header[1] = (byte) 3;
-            // Defining block's number
-            data_header[2] = (byte) 0;
-
-            // Buffer for input-stream of the file
-            byte[] buffer = new byte[512];
-
-            int i = 1;
-            // Check for stream end
-            //int read = 0;
-
-            boolean status = true;
-
-            int operations;
-
-            if(block_mod == 0) {
-                operations = 0;
-            }
-            else {
-                operations = 1;
-            }
-
-            System.out.println("Full package's count: "+blocks);
-
-            while(i <= blocks && operations == 1) {
-
-                if(i <= blocks) {
-                    fis.read(buffer, 0, buffer.length);
-                }
-
-                if(i > blocks) {
-                    buffer = new byte[block_mod];
-                    fis.read(buffer, 0, block_mod);
-                }
-
-                System.out.println(buffer.length);
-
-                // Creating byte-packet
-                byte[] send_packet = new byte[data_header.length + buffer.length];
+                // Concat two byte-arrays into one packet for delivery!
+                byte[] send_packet = new byte[data_header.length + packetLength];
 
                 // Copying content of the DATA-header to packet-array
                 System.arraycopy(data_header, 0, send_packet, 0, data_header.length);
 
                 // Copying content of the file's bytes to packet-array
-                System.arraycopy(buffer, 0, send_packet, data_header.length, buffer.length);
-
-                data_header[3] = (byte) (i);
+                System.arraycopy(buffer, (block-1)*512, send_packet, data_header.length, packetLength);
 
                 // Creating UDP-datagram and sending to destination point
                 DatagramPacket output = new DatagramPacket(send_packet, send_packet.length);
                 sendSocket.send(output);
 
                 // Receiving ACK-message
-                byte[] ack_packet = new byte[4];
-                DatagramPacket ack = new DatagramPacket(ack_packet, ack_packet.length);
-                sendSocket.receive(ack);
-                i++;
+                byte[] ack = new byte[4];
+                DatagramPacket ack_packet = new DatagramPacket(ack, ack.length);
+                sendSocket.setSoTimeout(1000);
+                try {
+                    sendSocket.receive(ack_packet);
+                }
+                catch (Exception e){
+                    // it expired, retry
+                    block--;
+                    errorcount++;
+                    continue;
+                }
+
+                // Checking content of ACK-message
+                if(fromBytes(ack[0], ack[1]) != OP_ACK) {
+                    // no ack received
+                    return false;
+                }
+                else if(fromBytes(ack[2], ack[3]) != block) {
+                    // wrong block number received, resend!
+                    errorcount++;
+                    block--;
+                }
+                else errorcount = 0; // it went trough
             }
 
-            fis.close();
+            return true;
+    }
+
+    private boolean receive_DATA_send_ACK(DatagramSocket sender, String path, int opcode) throws IOException {
+        // check path
+        File file = new File(path);
+        if(file.exists() && file.isFile()){
+            send_ERR(sender, "File already exists", 6);
+            return false;
+        }
+        if(path.contains("secret/")){
+            send_ERR(sender, "Access violation", 2);
+            return false;
         }
 
+        FileOutputStream fileWriter = new FileOutputStream(file);
+
+        // initial block
+        int block = 0, errorcount = 0;
+
+        while(true){
+            // check errorcount
+            if (errorcount > 3) return false;
+            // create ACK
+            ByteBuffer ack = ByteBuffer.allocate(4);
+            ack.putShort((short) OP_ACK);
+            ack.putShort((short) block);
+
+            // send ACK
+            sender.send(new DatagramPacket(ack.array(), 4));
+
+            // get data
+            byte[] recieved = new byte[BUFSIZE];
+            DatagramPacket packet = new DatagramPacket(recieved, recieved.length);
+            sender.setSoTimeout(1000);
+            try {
+                sender.receive(packet);
+            }
+            catch (Exception e){
+                // time expired
+                errorcount++;
+                continue;
+            }
+
+            // check data
+            byte[] data = packet.getData();
+
+            // no (valid) data
+            if(data.length < 4) return false;
+            int recievedBlock = fromBytes(data[2], data[3]);
+            if(recievedBlock == block+1) block++;
+            else {
+                // did not match our block number
+                errorcount++;
+                continue;
+            }
+
+
+            // write data
+            fileWriter.write(data, 4, packet.getLength()-4);
+            fileWriter.flush();
+
+            // reached end-of-file (?)
+            if(packet.getLength() < BUFSIZE) {
+                // create last ACK from previous ACK
+                ack.position(2);
+                ack.putShort((short) block);
+
+                // send last ack
+                sender.send(new DatagramPacket(ack.array(), 4));
+                break;
+            }
+        }
+
+        fileWriter.close();
         return true;
     }
 
-    private boolean receive_DATA_send_ACK(DatagramSocket sender, String path, int opcode) {
-        return true;
-    }
+    private void send_ERR(DatagramSocket sender, String message, int errorCode) throws IOException {
+        byte[] msgData = message.getBytes();
+        ByteBuffer sendPacket = ByteBuffer.allocate(5+msgData.length);
 
-    private void send_ERR(DatagramSocket sender, String path) {
-
+        sendPacket.putShort((short) OP_ERR);
+        sendPacket.putShort((short) errorCode);
+        sendPacket.put(msgData);
+        sendPacket.put((byte) 0);
+        sender.send(new DatagramPacket(sendPacket.array(), 5+msgData.length));
     }
 }

@@ -1,5 +1,5 @@
 # Rasmus & Phillip school lab assignment 3
 
-- [ ] Read function
-- [ ] Write function
-- [ ] Error handling
+- [x] Read function
+- [x] Write function
+- [x] Error handling
